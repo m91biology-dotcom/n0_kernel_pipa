@@ -1,6 +1,10 @@
 name: Build N0Kernel Pipa + ColorOS 17 (walt-r17)
 
 on:
+  push:
+    branches:
+      - main
+      - '15'
   workflow_dispatch:
     inputs:
       enable_kpm:
@@ -26,113 +30,184 @@ on:
 
 jobs:
   build-n0kernel-cos17:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     steps:
       - name: Maximize Build Disk Space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/share/dotnet /opt/ghc "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY"
           df -h
 
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            bc bison build-essential ccache curl flex git libelf-dev libssl-dev \
-            libncurses-dev lz4 python3 unzip wget xz-utils zip zstd \
+            bc bison build-essential ccache cpio curl flex git libelf-dev libssl-dev \
+            libncurses-dev lz4 python3 python3-pip python-is-python3 unzip wget xz-utils zip zstd \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi device-tree-compiler
 
-      - name: Checkout N0Kernel Pipa (Branch 15)
-        uses: actions/checkout@v4
+      - name: Cache AOSP Clang 20 Toolchain (r547379)
+        id: cache-toolchain
+        uses: actions/cache@v4
         with:
-          repository: m91biology-dotcom/n0_kernel_pipa
-          ref: '15'
-          fetch-depth: 0
-          path: kernel
+          path: ~/tc
+          key: clang-r547379
 
-      - name: Fetch & Port ColorOS 17 (walt-r17) Improvements
-        working-directory: kernel
+      - name: Download AOSP Clang 20 (r547379)
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
         run: |
-          git config user.name "m91biology-dotcom"
-          git config user.email "m91.biology@gmail.com"
-          git remote add cos17 https://github.com/m91biology-dotcom/kernel_xiaomi_pipa_cos17.git
-          git fetch cos17 oppo
+          git clone --depth 1 https://gitlab.com/alphadroid-project/prebuilts_clang_host_linux-x86_clang-r547379.git "$HOME/tc"
 
-          # Checkout COS17 OPPO kernel subsystems & drivers directly onto N0Kernel
-          git checkout cos17/oppo -- \
-            KernelSU \
-            fs/susfs.c \
-            include/linux/susfs.h \
-            include/linux/susfs_def.h \
-            kernel/oplus_cpu \
-            drivers/net/ovnet \
-            drivers/thermal/horae_shell_temp.c \
-            arch/arm64/configs/vendor/xiaomi/pipa-cos17.config \
-            arch/arm64/configs/vendor/xiaomi/pipa-oplus.config \
-            build-pipa-cos17.sh \
-            pack-boot.sh
+      - name: Verify Toolchain
+        run: |
+          export PATH="$HOME/tc/bin:$PATH"
+          clang --version
+          ld.lld --version
 
-          # Cherry-pick core kernel/driver commits from cos17/oppo
-          COMMITS=(
-            bc7bcc75 9d4ce967 e3ee0ff8 dde2a958 9ca15f62 7a0b96c4
-            73323f28 e4624c1d a40d8ad7 8b082e03 50ce2dfe e1f0cb74
-            bfca4408 e365f7e9 c7952027 f4fd3d7c fe409c52 6667e906
-            3d22ab4e 4868b8d9 e3d5d57c 4b63f36f a4b21f06 4f051b44
-            191c4c6e e5acbab6 9b1b4567 fe2b0ba8 ccd5ee79 28b6a5a5
-            e8a3f616 68186305 6e7293b6 6cff683e 986d8896 d04e1553
-            a3161aeb fc7e4330 1c75ded2 7865cece 4ebf956c 00952a1a
-            e9fb37ec 9b0ab5cc 81cc3f4d
-          )
-          for c in "${COMMITS[@]}"; do
-            git cherry-pick --no-edit -X theirs "$c" || {
-              git checkout --theirs .
-              git add -A
-              git commit --no-edit --allow-empty || true
-            }
+      - name: Checkout & Merge COS17 (walt-r17) + N0Kernel Pipa
+        run: |
+          git config --global user.name "m91biology-dotcom"
+          git config --global user.email "m91.biology@gmail.com"
+
+          echo "[1/5] Cloning ColorOS 17 walt-r17 kernel base (Linux 4.19.325-cip136 + OPPO UI First + SukiSU 41140)..."
+          git clone --depth 1 -b oppo https://github.com/m91biology-dotcom/kernel_xiaomi_pipa_cos17.git kernel
+
+          cd kernel
+          echo "[2/5] Fetching N0Kernel Pipa (branch 15) commits..."
+          git remote add n0 https://github.com/m91biology-dotcom/n0_kernel_pipa.git
+          git fetch --depth=50 n0 15
+
+          echo "[3/5] Applying N0Kernel Pipa patches (Bypass Charging, Maple I/O, Stylus Buttons, Thermal & USB1 Fixes)..."
+          for c in 0e073b43 99ea7f3b 1db01b28 555db11b 14d4197f 69d69817 735b9d06; do
+            echo "  -> Applying N0Kernel commit $c..."
+            git format-patch -1 --stdout "$c" | git apply --whitespace=nowarn
           done
 
-          # Preserve N0Kernel BTN_STYLUS pen button fix
-          git cherry-pick --no-edit 735b9d06 || { git checkout --ours . && git cherry-pick --abort || true; }
+          echo "[4/5] Applying N0Kernel USB Fast Charge & DTS optimizations (ESOC/mdm0 Wi-Fi fix + dcc_v2 removal)..."
+          git format-patch -1 --stdout a12268c8 -- \
+            drivers/power/supply/qcom/smb5-lib-pipa.c \
+            drivers/power/supply/qcom/smb5-lib.c \
+            drivers/power/supply/qcom/smb-lib.c | git apply --whitespace=nowarn
 
-      - name: Setup AOSP Clang 20 (r547379)
-        run: |
-          mkdir -p "$HOME/clang-r547379"
-          curl -L "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r547379.tar.gz" | tar -xz -C "$HOME/clang-r547379"
-          echo "$HOME/clang-r547379/bin" >> $GITHUB_PATH
+          git format-patch -1 --stdout a526c765 -- arch/arm64/boot/dts/vendor/qcom/pipa-sm8250.dtsi | git apply --whitespace=nowarn
+          git format-patch -1 --stdout f0b0af81 -- arch/arm64/boot/dts/vendor/qcom/kona.dtsi | git apply --whitespace=nowarn
+
+          echo "[5/5] Importing Linux 6.14 NTSYNC, USB FastChg & QCA Wi-Fi buffer safety from N0Kernel..."
+          git checkout n0/15 -- \
+            drivers/misc/ntsync.c \
+            include/uapi/linux/ntsync.h \
+            drivers/misc/fastchg.c \
+            include/linux/fastchg.h \
+            drivers/staging/qca-wifi-host-cmn/qdf/src/qdf_parse.c
+
+          if ! grep -q "LOCK_STATE_NOT_HELD" include/linux/lockdep.h; then
+            cat << 'EOF' >> include/linux/lockdep.h
+
+          #ifndef LOCK_STATE_NOT_HELD
+          #define LOCK_STATE_UNKNOWN	-1
+          #define LOCK_STATE_NOT_HELD	0
+          #define LOCK_STATE_HELD		1
+          #endif
+          #ifndef lockdep_is_held
+          #define lockdep_is_held(lock)	lockdep_is_held_type(lock, -1)
+          #endif
+          #ifndef lockdep_assert
+          #ifdef CONFIG_LOCKDEP
+          #define lockdep_assert(cond)	do { WARN_ON(debug_locks && !(cond)); } while (0)
+          #else
+          #define lockdep_assert(cond)	do { } while (0)
+          #endif
+          #endif
+          EOF
+          fi
+
+          if ! grep -q "CONFIG_FORCE_FAST_CHARGE" drivers/misc/Makefile; then
+            echo 'obj-$(CONFIG_FORCE_FAST_CHARGE) += fastchg.o' >> drivers/misc/Makefile
+          fi
+          if ! grep -q "CONFIG_NTSYNC" drivers/misc/Makefile; then
+            echo 'obj-$(CONFIG_NTSYNC) += ntsync.o' >> drivers/misc/Makefile
+          fi
+
+          python3 -c '
+          p = "drivers/misc/Kconfig"
+          s = open(p).read()
+          add = """
+          config FORCE_FAST_CHARGE
+          \tbool "Force faster charge rate for USB"
+          \tdefault y
+          \thelp
+          \t  This allows users to override default charge rate for USB.
+
+          config NTSYNC
+          \ttristate "NT synchronization primitive driver"
+          \tdefault y
+          \thelp
+          \t  This driver provides a kernel implementation of Windows NT synchronization primitives.
+          """
+          if "config NTSYNC" not in s:
+              idx = s.rfind("endmenu")
+              s = s[:idx] + add + "\n" + s[idx:]
+              open(p, "w").write(s)
+          '
+
+          git status -s
 
       - name: Compile Merged Kernel (N0Kernel + COS17 walt-r17)
         working-directory: kernel
         run: |
+          export PATH="$HOME/tc/bin:$PATH"
           export KBUILD_BUILD_USER="m91biology"
           export KBUILD_BUILD_HOST="pipa-cos17-n0"
           OUT=out
+          rm -rf "$OUT" error.log
           mkdir -p "$OUT"
 
-          MAKE_ARGS=(
+          A=(
             ARCH=arm64 O="$OUT" CC=clang LLVM=1 LLVM_IAS=1
             CROSS_COMPILE=aarch64-linux-gnu-
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
             AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
           )
 
-          make "${MAKE_ARGS[@]}" pipa_defconfig
-          ARCH=arm64 LLVM=1 scripts/kconfig/merge_config.sh -m -O "$OUT" \
-            "$OUT/.config" \
-            arch/arm64/configs/vendor/xiaomi/pipa-cos17.config \
-            arch/arm64/configs/vendor/xiaomi/pipa-oplus.config
+          C=arch/arm64/configs/vendor
+          F=(
+            "$C/kona-perf_defconfig"
+            "$C/xiaomi/sm8250-common.config"
+            "$C/xiaomi/pipa.config"
+            "$C/xiaomi/pipa-cos17.config"
+            "$C/xiaomi/pipa-oplus.config"
+          )
 
-          scripts/config --file "$OUT/.config" \
-            -e KSU -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT \
-            -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_ENABLE_LOG \
-            -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
-            -e KSU_SUSFS_OPEN_REDIRECT -e KSU_SUSFS_SUS_MAP \
+          ARCH=arm64 LLVM=1 scripts/kconfig/merge_config.sh -m -O "$OUT" "${F[@]}"
+
+          X=(
+            -e KSU -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT
+            -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_ENABLE_LOG
+            -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+            -e KSU_SUSFS_OPEN_REDIRECT -e KSU_SUSFS_SUS_MAP
+            -e NTSYNC -e FORCE_FAST_CHARGE -e IOSCHED_MAPLE
             -e VMAP_STACK -e STACKPROTECTOR_STRONG -e RSEQ
+            -d QCOM_DCC_V2 -d ESOC -d ESOC_DEV -d ESOC_CLIENT -d ESOC_MDM_4x -d CC_WERROR
+          )
 
           if [ "${{ inputs.enable_bootdbg }}" = "true" ]; then
-            scripts/config --file "$OUT/.config" -e PIPA_BOOTDBG -e SOFTLOCKUP_DETECTOR -e DETECT_HUNG_TASK
+            X+=(-e PIPA_BOOTDBG -e SOFTLOCKUP_DETECTOR -e DETECT_HUNG_TASK)
           fi
 
-          make "${MAKE_ARGS[@]}" olddefconfig
-          make "${MAKE_ARGS[@]}" -j"$(nproc --all)"
+          scripts/config --file "$OUT/.config" "${X[@]}"
+          make "${A[@]}" olddefconfig
+          make "${A[@]}" -j"$(nproc --all)" 2> >(tee -a error.log >&2)
+
+          if [ ! -f "$OUT/arch/arm64/boot/Image" ]; then
+            echo "Build failed!"
+            cat error.log
+            exit 1
+          fi
+
+          if [ ! -f "$OUT/arch/arm64/boot/dtb" ]; then
+            find "$OUT/arch/arm64/boot/dts" -name "*.dtb" -exec cat {} + > "$OUT/arch/arm64/boot/dtb"
+          fi
+
+          ls -lh "$OUT/arch/arm64/boot/Image" "$OUT/arch/arm64/boot/dtb" "$OUT/arch/arm64/boot/dtbo.img"
 
       - name: Optional KPM 0.14.0 Image Patching
         if: ${{ inputs.enable_kpm == 'true' }}
@@ -151,16 +226,27 @@ jobs:
           rm -rf anykernel/kernels/
           mkdir -p anykernel/kernels/
           cp out/arch/arm64/boot/Image anykernel/kernels/
-          [ -f out/arch/arm64/boot/dtb ] && cp out/arch/arm64/boot/dtb anykernel/kernels/
-          [ -f out/arch/arm64/boot/dtbo.img ] && cp out/arch/arm64/boot/dtbo.img anykernel/kernels/
+          cp out/arch/arm64/boot/dtb anykernel/kernels/
+          cp out/arch/arm64/boot/dtbo.img anykernel/kernels/
           cd anykernel
-          zip -r9 ../N0Kernel_Pipa_COS17_walt-r17_AnyKernel3.zip ./* -x .git .gitignore out/ ./*.zip
+          ZIP_NAME="N0Kernel_Pipa_COS17_walt-r17_AnyKernel3.zip"
+          zip -r9 "../$ZIP_NAME" ./* -x .git .gitignore out/ ./*.zip
 
-      - name: Upload Flashable Kernel Artifacts
+      - name: Upload Flashable Kernel ZIP & Image
         uses: actions/upload-artifact@v4
         with:
-          name: N0Kernel-Pipa-COS17-walt-r17-Flashable
+          name: N0Kernel-Pipa-COS17-walt-r17-${{ github.run_number }}
           path: |
             kernel/N0Kernel_Pipa_COS17_walt-r17_AnyKernel3.zip
             kernel/out/arch/arm64/boot/Image
+            kernel/out/arch/arm64/boot/dtbo.img
             kernel/pack-boot.sh
+          retention-days: 30
+
+      - name: Upload Error Log (If Failed)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-log-${{ github.run_number }}
+          path: kernel/error.log
+          if-no-files-found: ignore
