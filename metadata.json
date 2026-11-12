@@ -1,0 +1,5 @@
+{
+  "name": "Pipa Kernel Studio — COS17 to N0Kernel Port & Builder",
+  "description": "Engineering workbench for porting ColorOS 17 (walt-r17) kernel improvements from kernel_xiaomi_pipa_cos17 into n0_kernel_pipa and generating flashable Xiaomi Pad 6 (pipa) builds.",
+  "requestFramePermissions": []
+}
