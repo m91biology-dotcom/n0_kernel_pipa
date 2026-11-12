@@ -1,0 +1,166 @@
+name: Build N0Kernel Pipa + ColorOS 17 (walt-r17)
+
+on:
+  workflow_dispatch:
+    inputs:
+      enable_kpm:
+        description: 'Patch Image with KernelPatch (KPM 0.14.0)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      kpm_superkey:
+        description: 'KPM SuperKey (if KPM is enabled)'
+        required: false
+        default: 'pipa2026'
+      enable_bootdbg:
+        description: 'Enable CONFIG_PIPA_BOOTDBG boot watchdog'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+jobs:
+  build-n0kernel-cos17:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Maximize Build Disk Space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache curl flex git libelf-dev libssl-dev \
+            libncurses-dev lz4 python3 unzip wget xz-utils zip zstd \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi device-tree-compiler
+
+      - name: Checkout N0Kernel Pipa (Branch 15)
+        uses: actions/checkout@v4
+        with:
+          repository: m91biology-dotcom/n0_kernel_pipa
+          ref: '15'
+          fetch-depth: 0
+          path: kernel
+
+      - name: Fetch & Port ColorOS 17 (walt-r17) Improvements
+        working-directory: kernel
+        run: |
+          git config user.name "m91biology-dotcom"
+          git config user.email "m91.biology@gmail.com"
+          git remote add cos17 https://github.com/m91biology-dotcom/kernel_xiaomi_pipa_cos17.git
+          git fetch cos17 oppo
+
+          # Checkout COS17 OPPO kernel subsystems & drivers directly onto N0Kernel
+          git checkout cos17/oppo -- \
+            KernelSU \
+            fs/susfs.c \
+            include/linux/susfs.h \
+            include/linux/susfs_def.h \
+            kernel/oplus_cpu \
+            drivers/net/ovnet \
+            drivers/thermal/horae_shell_temp.c \
+            arch/arm64/configs/vendor/xiaomi/pipa-cos17.config \
+            arch/arm64/configs/vendor/xiaomi/pipa-oplus.config \
+            build-pipa-cos17.sh \
+            pack-boot.sh
+
+          # Cherry-pick core kernel/driver commits from cos17/oppo
+          COMMITS=(
+            bc7bcc75 9d4ce967 e3ee0ff8 dde2a958 9ca15f62 7a0b96c4
+            73323f28 e4624c1d a40d8ad7 8b082e03 50ce2dfe e1f0cb74
+            bfca4408 e365f7e9 c7952027 f4fd3d7c fe409c52 6667e906
+            3d22ab4e 4868b8d9 e3d5d57c 4b63f36f a4b21f06 4f051b44
+            191c4c6e e5acbab6 9b1b4567 fe2b0ba8 ccd5ee79 28b6a5a5
+            e8a3f616 68186305 6e7293b6 6cff683e 986d8896 d04e1553
+            a3161aeb fc7e4330 1c75ded2 7865cece 4ebf956c 00952a1a
+            e9fb37ec 9b0ab5cc 81cc3f4d
+          )
+          for c in "${COMMITS[@]}"; do
+            git cherry-pick --no-edit -X theirs "$c" || {
+              git checkout --theirs .
+              git add -A
+              git commit --no-edit --allow-empty || true
+            }
+          done
+
+          # Preserve N0Kernel BTN_STYLUS pen button fix
+          git cherry-pick --no-edit 735b9d06 || { git checkout --ours . && git cherry-pick --abort || true; }
+
+      - name: Setup AOSP Clang 20 (r547379)
+        run: |
+          mkdir -p "$HOME/clang-r547379"
+          curl -L "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r547379.tar.gz" | tar -xz -C "$HOME/clang-r547379"
+          echo "$HOME/clang-r547379/bin" >> $GITHUB_PATH
+
+      - name: Compile Merged Kernel (N0Kernel + COS17 walt-r17)
+        working-directory: kernel
+        run: |
+          export KBUILD_BUILD_USER="m91biology"
+          export KBUILD_BUILD_HOST="pipa-cos17-n0"
+          OUT=out
+          mkdir -p "$OUT"
+
+          MAKE_ARGS=(
+            ARCH=arm64 O="$OUT" CC=clang LLVM=1 LLVM_IAS=1
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+            AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+          )
+
+          make "${MAKE_ARGS[@]}" pipa_defconfig
+          ARCH=arm64 LLVM=1 scripts/kconfig/merge_config.sh -m -O "$OUT" \
+            "$OUT/.config" \
+            arch/arm64/configs/vendor/xiaomi/pipa-cos17.config \
+            arch/arm64/configs/vendor/xiaomi/pipa-oplus.config
+
+          scripts/config --file "$OUT/.config" \
+            -e KSU -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT \
+            -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_ENABLE_LOG \
+            -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            -e KSU_SUSFS_OPEN_REDIRECT -e KSU_SUSFS_SUS_MAP \
+            -e VMAP_STACK -e STACKPROTECTOR_STRONG -e RSEQ
+
+          if [ "${{ inputs.enable_bootdbg }}" = "true" ]; then
+            scripts/config --file "$OUT/.config" -e PIPA_BOOTDBG -e SOFTLOCKUP_DETECTOR -e DETECT_HUNG_TASK
+          fi
+
+          make "${MAKE_ARGS[@]}" olddefconfig
+          make "${MAKE_ARGS[@]}" -j"$(nproc --all)"
+
+      - name: Optional KPM 0.14.0 Image Patching
+        if: ${{ inputs.enable_kpm == 'true' }}
+        working-directory: kernel
+        run: |
+          wget -qO kptools-linux https://github.com/bmax121/KernelPatch/releases/download/0.14.0/kptools-linux
+          wget -qO kpimg https://github.com/bmax121/KernelPatch/releases/download/0.14.0/kpimg-android
+          chmod +x kptools-linux
+          ./kptools-linux -p -i out/arch/arm64/boot/Image -k kpimg -s "${{ inputs.kpm_superkey }}" -o out/arch/arm64/boot/Image-kpm
+          mv out/arch/arm64/boot/Image-kpm out/arch/arm64/boot/Image
+
+      - name: Package Flashable AnyKernel3 ZIP
+        working-directory: kernel
+        run: |
+          git clone https://github.com/CuriousNom/AnyKernel3 -b pipa-n0 --single-branch --depth=1 anykernel
+          rm -rf anykernel/kernels/
+          mkdir -p anykernel/kernels/
+          cp out/arch/arm64/boot/Image anykernel/kernels/
+          [ -f out/arch/arm64/boot/dtb ] && cp out/arch/arm64/boot/dtb anykernel/kernels/
+          [ -f out/arch/arm64/boot/dtbo.img ] && cp out/arch/arm64/boot/dtbo.img anykernel/kernels/
+          cd anykernel
+          zip -r9 ../N0Kernel_Pipa_COS17_walt-r17_AnyKernel3.zip ./* -x .git .gitignore out/ ./*.zip
+
+      - name: Upload Flashable Kernel Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: N0Kernel-Pipa-COS17-walt-r17-Flashable
+          path: |
+            kernel/N0Kernel_Pipa_COS17_walt-r17_AnyKernel3.zip
+            kernel/out/arch/arm64/boot/Image
+            kernel/pack-boot.sh
