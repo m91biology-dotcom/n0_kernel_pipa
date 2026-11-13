@@ -35,13 +35,12 @@ git format-patch -1 --stdout a12268c8 -- \
 git format-patch -1 --stdout a526c765 -- arch/arm64/boot/dts/vendor/qcom/pipa-sm8250.dtsi | git apply --whitespace=nowarn
 git format-patch -1 --stdout f0b0af81 -- arch/arm64/boot/dts/vendor/qcom/kona.dtsi | git apply --whitespace=nowarn
 
-echo "[4/6] Importing Linux 6.14 NTSYNC, USB FastChg & QCA Wi-Fi buffer safety from N0Kernel..."
+echo "[4/6] Importing Linux 6.14 NTSYNC & USB FastChg from N0Kernel..."
 git checkout n0/15 -- \
   drivers/misc/ntsync.c \
   include/uapi/linux/ntsync.h \
   drivers/misc/fastchg.c \
-  include/linux/fastchg.h \
-  drivers/staging/qca-wifi-host-cmn/qdf/src/qdf_parse.c
+  include/linux/fastchg.h
 
 if ! grep -q "LOCK_STATE_NOT_HELD" include/linux/lockdep.h; then
   cat << 'EOF' >> include/linux/lockdep.h
@@ -95,7 +94,8 @@ if "config NTSYNC" not in s:
 
 echo "[5/6] Setting up AOSP Clang 20 (r547379) & Compiling..."
 if [ ! -d "$CLANG_DIR/bin" ]; then
-  git clone --depth 1 https://gitlab.com/alphadroid-project/prebuilts_clang_host_linux-x86_clang-r547379.git "$CLANG_DIR"
+  mkdir -p "$CLANG_DIR"
+  curl -sL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r547379.tar.gz" | tar -xz -C "$CLANG_DIR"
 fi
 export PATH="$CLANG_DIR/bin:$PATH"
 
