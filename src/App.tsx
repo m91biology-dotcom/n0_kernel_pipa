@@ -253,7 +253,7 @@ cd "\$WORKDIR"
 echo "[2/6] Fetching N0Kernel Pipa (branch 15) commits..."
 git remote remove n0 2>/dev/null || true
 git remote add n0 https://github.com/m91biology-dotcom/n0_kernel_pipa.git
-git fetch --depth=50 n0 15
+git fetch --depth=150 n0 15
 
 echo "[3/6] Applying N0Kernel Pipa patches (Bypass Charging, Maple I/O, Stylus Buttons, Thermal & USB1 Fixes)..."
 for c in 0e073b43 99ea7f3b 1db01b28 555db11b 14d4197f 69d69817 735b9d06; do
@@ -274,6 +274,8 @@ git checkout n0/15 -- \\
   include/uapi/linux/ntsync.h \\
   drivers/misc/fastchg.c \\
   include/linux/fastchg.h
+
+git checkout HEAD -- drivers/staging/qca-wifi-host-cmn/qdf/src/qdf_parse.c
 
 if ! grep -q "LOCK_STATE_NOT_HELD" include/linux/lockdep.h; then
   cat << 'EOF' >> include/linux/lockdep.h

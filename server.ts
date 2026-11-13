@@ -83,12 +83,16 @@ async function startServer() {
 
   // API route: serve local scripts generated in the workspace
   app.get('/api/scripts/:name', (req, res) => {
-    const allowed: Record<string, string> = {
-      'port-cos17-to-n0kernel.sh': path.join(__dirname, 'port-cos17-to-n0kernel.sh'),
-      'build-n0kernel-cos17.yml': path.join(__dirname, '.github', 'workflows', 'build-n0kernel-cos17.yml'),
+    const allowed: Record<string, string[]> = {
+      'port-cos17-to-n0kernel.sh': [path.join(__dirname, 'port-cos17-to-n0kernel.sh')],
+      'build-n0kernel-cos17.yml': [
+        path.join(__dirname, 'build-n0kernel-cos17.yml'),
+        path.join(__dirname, '.github', 'workflows', 'build-n0kernel-cos17.yml'),
+      ],
     };
-    const target = allowed[req.params.name];
-    if (!target || !fs.existsSync(target)) {
+    const candidates = allowed[req.params.name] || [];
+    const target = candidates.find((p) => fs.existsSync(p));
+    if (!target) {
       res.status(404).json({ error: 'Script not found' });
       return;
     }
