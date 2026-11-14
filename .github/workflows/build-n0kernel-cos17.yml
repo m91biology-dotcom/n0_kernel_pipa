@@ -79,7 +79,7 @@ jobs:
           git fetch --depth=150 n0 15
 
           echo "[3/5] Applying N0Kernel Pipa patches (Bypass Charging, Maple I/O, Stylus Buttons, Thermal & USB1 Fixes)..."
-          for c in 0e073b43 99ea7f3b 1db01b28 555db11b 14d4197f 69d69817 735b9d06; do
+          for c in 0e073b43 99ea7f3b 1db01b28 14d4197f 69d69817 735b9d06; do
             echo "  -> Applying N0Kernel commit $c..."
             git format-patch -1 --stdout "$c" | git apply --whitespace=nowarn
           done
@@ -102,6 +102,23 @@ jobs:
 
           # Ensure ColorOS 17 qdf_parse.c is preserved (avoids missing wlan_cfg_ini.h error)
           git checkout HEAD -- drivers/staging/qca-wifi-host-cmn/qdf/src/qdf_parse.c
+
+          # Fix VINTF boot warning popup ("There's an internal problem with your device") on HyperOS 2 / MIUI:
+          # Report real 4.19.325 to system_server (UID 1000) so VintfObject matches vendor compatibility_matrix (4.19.x)
+          python3 -c '
+          p = "kernel/sys.c"
+          s = open(p).read()
+          target = """\t} else if ((cur_uid >= 1000 || !strcmp(current->comm, "main")) &&
+          \t\t   strcmp(current->group_leader->comm, "hans")) {
+          \t\t/*
+          \t\t * Not for OPPO\x27s hans daemon: on >= 5.10 it talks generic netlink
+          \t\t * ("oplus_hans"); our 4.19 Hans channel is the legacy netlink 29.
+          \t\t */
+          \t\tstrlcpy(tmp.release, "5.10.325", sizeof(tmp.release));
+          \t}"""
+          if target in s:
+              open(p, "w").write(s.replace(target, "\t}"))
+          '
 
           if ! grep -q "LOCK_STATE_NOT_HELD" include/linux/lockdep.h; then
             cat << 'EOF' >> include/linux/lockdep.h
