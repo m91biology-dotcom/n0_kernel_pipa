@@ -200,7 +200,13 @@ jobs:
 
           ARCH=arm64 LLVM=1 scripts/kconfig/merge_config.sh -m -O "$OUT" "${F[@]}"
 
+          # Prevent git commit hash (-g3c6ee81558b1) and -dirty suffix from being appended
+          : > .scmversion
+          : > "$OUT/.scmversion"
+
           X=(
+            --set-str LOCALVERSION "-perf-no+cos17Moj-ir"
+            -d LOCALVERSION_AUTO
             -e KSU -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT
             -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_ENABLE_LOG
             -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
@@ -215,8 +221,9 @@ jobs:
           fi
 
           scripts/config --file "$OUT/.config" "${X[@]}"
-          make "${A[@]}" olddefconfig
-          make "${A[@]}" -j"$(nproc --all)" 2> >(tee -a error.log >&2)
+          make "${A[@]}" LOCALVERSION="" olddefconfig
+          echo "Target Kernel Release: $(make -s "${A[@]}" LOCALVERSION="" kernelrelease)"
+          make "${A[@]}" LOCALVERSION="" -j"$(nproc --all)" 2> >(tee -a error.log >&2)
 
           if [ ! -f "$OUT/arch/arm64/boot/Image" ]; then
             echo "Build failed!"
