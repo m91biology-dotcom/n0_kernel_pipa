@@ -103,21 +103,177 @@ jobs:
           # Ensure ColorOS 17 qdf_parse.c is preserved (avoids missing wlan_cfg_ini.h error)
           git checkout HEAD -- drivers/staging/qca-wifi-host-cmn/qdf/src/qdf_parse.c
 
-          # Fix VINTF boot warning popup ("There's an internal problem with your device") on HyperOS 2 / MIUI:
-          # Report real 4.19.325 to system_server (UID 1000) so VintfObject matches vendor compatibility_matrix (4.19.x)
+          # Fix VINTF boot warning popup + all 7 dmesg kernel health errors on Xiaomi Pad 6 (HyperOS 2)
           python3 -c '
-          p = "kernel/sys.c"
-          s = open(p).read()
-          target = """\t} else if ((cur_uid >= 1000 || !strcmp(current->comm, "main")) &&
+          def patch_file(path, old, new):
+              s = open(path).read()
+              if old in s:
+                  open(path, "w").write(s.replace(old, new))
+                  print("Patched:", path)
+
+          # 0. Fix VINTF boot warning popup ("There is an internal problem with your device") on HyperOS 2
+          patch_file("kernel/sys.c",
+          """\t} else if ((cur_uid >= 1000 || !strcmp(current->comm, "main")) &&
           \t\t   strcmp(current->group_leader->comm, "hans")) {
           \t\t/*
           \t\t * Not for OPPO\x27s hans daemon: on >= 5.10 it talks generic netlink
           \t\t * ("oplus_hans"); our 4.19 Hans channel is the legacy netlink 29.
           \t\t */
           \t\tstrlcpy(tmp.release, "5.10.325", sizeof(tmp.release));
-          \t}"""
-          if target in s:
-              open(p, "w").write(s.replace(target, "\t}"))
+          \t}""", "\t}")
+
+          # 1. Fix power_supply main: driver failed to report health property: -22 (every 5s uevent failure)
+          patch_file("drivers/power/supply/qcom/smb5-lib-pipa.c",
+          """\trc = power_supply_get_property(chg->cp_psy,
+          \t\t\t\tPOWER_SUPPLY_PROP_CP_DIE_TEMP, &prop);
+          \tif (rc < 0)
+          \t\treturn rc;""",
+          """\trc = power_supply_get_property(chg->cp_psy,
+          \t\t\t\tPOWER_SUPPLY_PROP_CP_DIE_TEMP, &prop);
+          \tif (rc < 0)
+          \t\treturn POWER_SUPPLY_HEALTH_COOL;""")
+
+          patch_file("drivers/power/supply/qcom/qpnp-smb5-pipa.c",
+          """\t/* Use this property to report SMB health */
+          \tcase POWER_SUPPLY_PROP_HEALTH:
+          \t\trc = val->intval = smblib_get_prop_smb_health(chg);
+          \t\tbreak;""",
+          """\t/* Use this property to report SMB health */
+          \tcase POWER_SUPPLY_PROP_HEALTH:
+          \t\tval->intval = smblib_get_prop_smb_health(chg);
+          \t\tif (val->intval < 0)
+          \t\t\tval->intval = POWER_SUPPLY_HEALTH_COOL;
+          \t\trc = 0;
+          \t\tbreak;""")
+
+          # 2. Fix power_supply fuda (nu1665 stylus wireless charger): driver failed to report pin_enabled: -22
+          patch_file("drivers/power/supply/qcom/nu1665.c",
+          """\t\trc = nuvolta_1665_get_temp(chip, &temp);
+          \t\tif (rc > 0)
+          \t\t\tval->intval = temp;
+          \t\telse
+          \t\t\tval->intval = 0;
+          \tdefault:
+          \t\treturn -EINVAL;""",
+          """\t\trc = nuvolta_1665_get_temp(chip, &temp);
+          \t\tif (rc > 0)
+          \t\t\tval->intval = temp;
+          \t\telse
+          \t\t\tval->intval = 0;
+          \t\tbreak;
+          \tcase POWER_SUPPLY_PROP_PIN_ENABLED:
+          \tcase POWER_SUPPLY_PROP_PRESENT:
+          \tcase POWER_SUPPLY_PROP_WIRELESS_VERSION:
+          \tcase POWER_SUPPLY_PROP_INPUT_VOLTAGE_REGULATION:
+          \tcase POWER_SUPPLY_PROP_INPUT_VOLTAGE_VRECT:
+          \tcase POWER_SUPPLY_PROP_RX_IOUT:
+          \tcase POWER_SUPPLY_PROP_DIV_2_MODE:
+          \t\tval->intval = 0;
+          \t\tbreak;
+          \tdefault:
+          \t\treturn -EINVAL;""")
+
+          # 3. Fix [ds28e16] set_sched_affinity_to_current/all failed(-22) on kworker threads
+          for ds_file in ["drivers/power/supply/maxim_pipa/ds28e16_master.c",
+                          "drivers/power/supply/maxim_pipa/ds28e16_slave.c"]:
+              patch_file(ds_file,
+              "    preempt_disable();\n    current_cpu = smp_processor_id();\n    ret = sched_setaffinity(CURRENT_DS28E16_TASK, cpumask_of(current_cpu));",
+              "    if (current->flags & PF_NO_SETAFFINITY)\n        return;\n    preempt_disable();\n    current_cpu = smp_processor_id();\n    ret = sched_setaffinity(CURRENT_DS28E16_TASK, cpumask_of(current_cpu));")
+              patch_file(ds_file,
+              "    cpumask_setall(&dstp);\n    ret = sched_setaffinity(CURRENT_DS28E16_TASK, &dstp);",
+              "    if (current->flags & PF_NO_SETAFFINITY)\n        return;\n    cpumask_setall(&dstp);\n    ret = sched_setaffinity(CURRENT_DS28E16_TASK, &dstp);")
+
+          # 4. Fix duplicate arm-smmu driver registration in drivers/iommu/arm-smmu.c
+          patch_file("drivers/iommu/arm-smmu.c",
+          """static int __init arm_smmu_driver_init(void)
+          {
+          \tint ret;
+
+          \tret = platform_driver_register(&arm_smmu_driver);
+          #ifdef MODULE
+          \tif (!ret)
+          \t\tarm_smmu_legacy_bus_init();
+          #endif
+          \treturn ret;
+          }
+
+          static void __exit arm_smmu_driver_exit(void)
+          {
+          \tplatform_driver_unregister(&arm_smmu_driver);
+          }
+
+          subsys_initcall(arm_smmu_driver_init);
+          module_exit(arm_smmu_driver_exit);""", "")
+
+          # 5. Prevent trace_printk() extra per-CPU buffer allocation & warning at boot
+          patch_file("kernel/trace/trace.c",
+          """void trace_printk_init_buffers(void)
+          {
+          \tif (buffers_allocated)
+          \t\treturn;""",
+          """void trace_printk_init_buffers(void)
+          {
+          \tbuffers_allocated = 1;
+          \treturn;""")
+
+          # 6. Silence HyperOS 2 custom DRM event 0x8000000f error in sde_crtc.c
+          patch_file("techpack/display/msm/sde/sde_crtc.c",
+          """\tif (!node) {
+          \t\tSDE_ERROR("unsupported event %x\\n", event);
+          \t\treturn -EINVAL;
+          \t}""",
+          """\tif (!node) {
+          \t\tif (event == 0x8000000f)
+          \t\t\treturn 0;
+          \t\tSDE_ERROR("unsupported event %x\\n", event);
+          \t\treturn -EINVAL;
+          \t}""")
+
+          # 7. Disable non-existent 5G modem/camera PMICs (pm8009 & pmxprairie) on Wi-Fi-only pipa
+          patch_file("arch/arm64/boot/dts/vendor/qcom/pm8009.dtsi",
+          "\tqcom,pm8009@a {\n\t\tcompatible =\"qcom,spmi-pmic\";",
+          "\tqcom,pm8009@a {\n\t\tstatus = \"disabled\";\n\t\tcompatible =\"qcom,spmi-pmic\";")
+          patch_file("arch/arm64/boot/dts/vendor/qcom/pm8009.dtsi",
+          "\tqcom,pm8009@b {\n\t\tcompatible = \"qcom,spmi-pmic\";",
+          "\tqcom,pm8009@b {\n\t\tstatus = \"disabled\";\n\t\tcompatible = \"qcom,spmi-pmic\";")
+          patch_file("arch/arm64/boot/dts/vendor/qcom/kona-pmic-overlay.dtsi",
+          "\tqcom,pmxprairie@8 {\n\t\tcompatible = \"qcom,spmi-pmic\";",
+          "\tqcom,pmxprairie@8 {\n\t\tstatus = \"disabled\";\n\t\tcompatible = \"qcom,spmi-pmic\";")
+          patch_file("arch/arm64/boot/dts/vendor/qcom/kona-pmic-overlay.dtsi",
+          "\tqcom,pmxprairie@9 {\n\t\tcompatible =\"qcom,spmi-pmic\";",
+          "\tqcom,pmxprairie@9 {\n\t\tstatus = \"disabled\";\n\t\tcompatible =\"qcom,spmi-pmic\";")
+          patch_file("arch/arm64/boot/dts/vendor/qcom/kona-pmic-overlay.dtsi",
+          "\tvreg_tof: regulator-dbb1 {\n\t\tcompatible = \"regulator-fixed\";",
+          "\tvreg_tof: regulator-dbb1 {\n\t\tstatus = \"disabled\";\n\t\tcompatible = \"regulator-fixed\";")
+
+          # 8. Force ZRAM compression algorithm to ZSTD (including overriding HyperOS 2 fstab/init lz4/lzo writes)
+          patch_file("drivers/block/zram/zram_drv.c",
+          """\tstrlcpy(compressor, buf, sizeof(compressor));
+          \t/* ignore trailing newline */
+          \tsz = strlen(compressor);
+          \tif (sz > 0 && compressor[sz - 1] == \x27\\n\x27)
+          \t\tcompressor[sz - 1] = 0x00;""",
+          """\tstrlcpy(compressor, buf, sizeof(compressor));
+          \t/* ignore trailing newline */
+          \tsz = strlen(compressor);
+          \tif (sz > 0 && compressor[sz - 1] == \x27\\n\x27)
+          \t\tcompressor[sz - 1] = 0x00;
+          \tif (!strcmp(compressor, "lz4") || !strcmp(compressor, "lzo") ||
+          \t    !strcmp(compressor, "lzo-rle") || !strcmp(compressor, "lz4kd"))
+          \t\tstrlcpy(compressor, "zstd", sizeof(compressor));""")
+
+          # 9. Add 75Hz display refresh rate support to both CSOT & Tianma panels on Xiaomi Pad 6 (pipa)
+          for panel_dts in [
+              "arch/arm64/boot/dts/vendor/qcom/dsi-panel-m82-42-02-0b-video.dtsi",
+              "arch/arm64/boot/dts/vendor/qcom/dsi-panel-m82-36-02-0a-video.dtsi",
+          ]:
+              patch_file(panel_dts,
+              "qcom,dsi-supported-dfps-list = <120 144 90 60 50 48 30>;",
+              "qcom,dsi-supported-dfps-list = <120 144 90 75 60 50 48 30>;")
+
+          patch_file("techpack/display/msm/dsi/dsi_panel_mi.c",
+          "else if (adj_mode->timing.refresh_rate == 90)",
+          "else if (adj_mode->timing.refresh_rate == 90 || adj_mode->timing.refresh_rate == 75)")
           '
 
           if ! grep -q "LOCK_STATE_NOT_HELD" include/linux/lockdep.h; then
@@ -212,6 +368,9 @@ jobs:
             -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
             -e KSU_SUSFS_OPEN_REDIRECT -e KSU_SUSFS_SUS_MAP
             -e NTSYNC -e FORCE_FAST_CHARGE -e IOSCHED_MAPLE
+            -e ZRAM -e CRYPTO_ZSTD -e ZRAM_DEF_COMP_ZSTD
+            -d ZRAM_DEF_COMP_LZ4KD -d ZRAM_DEF_COMP_LZORLE -d ZRAM_DEF_COMP_LZ4
+            --set-str ZRAM_DEF_COMP "zstd"
             -e VMAP_STACK -e STACKPROTECTOR_STRONG -e RSEQ
             -d QCOM_DCC_V2 -d ESOC -d ESOC_DEV -d ESOC_CLIENT -d ESOC_MDM_4x -d CC_WERROR
           )
