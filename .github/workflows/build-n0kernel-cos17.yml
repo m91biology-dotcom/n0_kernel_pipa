@@ -885,7 +885,7 @@ jobs:
       - name: Upload Error Log (If Failed)
         if: failure()
         uses: actions/upload-artifact@v4
-        if-no-files-found: ignore
         with:
           name: error-log-${{ github.run_number }}
           path: kernel/error.log
+          if-no-files-found: ignore
