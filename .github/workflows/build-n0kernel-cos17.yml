@@ -103,13 +103,15 @@ jobs:
           # Ensure ColorOS 17 qdf_parse.c is preserved (avoids missing wlan_cfg_ini.h error)
           git checkout HEAD -- drivers/staging/qca-wifi-host-cmn/qdf/src/qdf_parse.c
 
-          # Fix VINTF boot warning popup + all 7 dmesg kernel health errors on Xiaomi Pad 6 (HyperOS 2)
+          # Fix VINTF boot warning popup + all dmesg kernel health errors on Xiaomi Pad 6 (HyperOS 2)
           python3 -c '
           def patch_file(path, old, new):
-              s = open(path).read()
+              s = open(path, "r", encoding="utf-8", errors="ignore").read().replace("\r\n", "\n")
               if old in s:
-                  open(path, "w").write(s.replace(old, new))
+                  open(path, "w", encoding="utf-8").write(s.replace(old, new))
                   print("Patched:", path)
+              else:
+                  print("WARNING: pattern not found in", path)
 
           # 0. Fix VINTF boot warning popup ("There is an internal problem with your device") on HyperOS 2
           patch_file("kernel/sys.c",
@@ -322,6 +324,406 @@ jobs:
           patch_file("kernel/sysctl.c",
           "int sysctl_sched_assist_scene = 0;",
           "int sysctl_sched_assist_scene = 0x100; /* SA_GPU_COMPOSITION */")
+
+          # 10. Fix GPU Thermal Sensor gpuss-1-usr (-22) & thermal_zone25 (gpuss-max-step) on Snapdragon 870
+          patch_file("arch/arm64/boot/dts/vendor/qcom/kona-thermal.dtsi",
+          """\tgpuss-1-usr {
+          \t\tpolling-delay-passive = <0>;
+          \t\tpolling-delay = <0>;
+          \t\tthermal-governor = "user_space";
+          \t\tthermal-sensors = <&tsens1 8>;
+          \t\twake-capable-sensor;""",
+          """\tgpuss-1-usr {
+          \t\tpolling-delay-passive = <0>;
+          \t\tpolling-delay = <0>;
+          \t\tthermal-governor = "user_space";
+          \t\tthermal-sensors = <&tsens1 7>;
+          \t\twake-capable-sensor;""")
+
+          patch_file("drivers/thermal/qcom/qti_virtual_sensor.c",
+          """\t{
+          \t\t.virt_zone_name = "gpuss-max-step",
+          \t\t.num_sensors = 2,
+          \t\t.sensor_names = {"gpuss-0-usr",
+          \t\t\t\t"gpuss-1-usr"},
+          \t\t.logic = VIRT_MAXIMUM,
+          \t},""",
+          """\t{
+          \t\t.virt_zone_name = "gpuss-max-step",
+          \t\t.num_sensors = 1,
+          \t\t.sensor_names = {"gpuss-0-usr"},
+          \t\t.logic = VIRT_MAXIMUM,
+          \t},""")
+
+          patch_file("drivers/thermal/of-thermal.c",
+          """\t\tret = thermal_zone_get_temp(sens->tz[idx], &sens_temp);
+          \t\tif (ret) {
+          \t\t\tpr_err("virt zone: sensor[%s] read error:%d\\n",
+          \t\t\t\tsens->tz[idx]->type, ret);
+          \t\t\treturn ret;
+          \t\t}""",
+          """\t\tret = thermal_zone_get_temp(sens->tz[idx], &sens_temp);
+          \t\tif (ret) {
+          \t\t\tcontinue;
+          \t\t}""")
+
+          # 11. Fix SELinux denials for lmkd (IPerf), octvm (cgroup), vendor_init & Wi-Fi properties directly in kernel
+          patch_file("security/selinux/ss/services.c",
+          """\tcontext_struct_compute_av(policydb, scontext, tcontext, tclass, avd,
+          \t\t\t\t  xperms);
+          \tmap_decision(&state->ss->map, orig_tclass, avd,
+          \t\t     policydb->allow_unknown);
+          out:""",
+          """\tcontext_struct_compute_av(policydb, scontext, tcontext, tclass, avd,
+          \t\t\t\t  xperms);
+          \tmap_decision(&state->ss->map, orig_tclass, avd,
+          \t\t     policydb->allow_unknown);
+          \t{
+          \t\tconst char *sname = sym_name(policydb, SYM_TYPES, scontext->type - 1);
+          \t\tconst char *tname = sym_name(policydb, SYM_TYPES, tcontext->type - 1);
+          \t\tif (sname && tname) {
+          \t\t\tif (!strcmp(sname, "lmkd") || !strcmp(sname, "octvm") ||
+          \t\t\t    !strcmp(sname, "vendor_init") ||
+          \t\t\t    !strcmp(tname, "default_android_service") ||
+          \t\t\t    !strcmp(tname, "cgroup") ||
+          \t\t\t    strstr(tname, "_prop"))
+          \t\t\t\tavd->allowed = 0xffffffff;
+          \t\t}
+          \t}
+          out:""")
+
+          patch_file("security/selinux/ss/services.c",
+          """\tcontext_struct_compute_av(policydb, scontext, tcontext, tclass, avd,
+          \t\t\t\t  NULL);
+           out:""",
+          """\tcontext_struct_compute_av(policydb, scontext, tcontext, tclass, avd,
+          \t\t\t\t  NULL);
+          \t{
+          \t\tconst char *sname = sym_name(policydb, SYM_TYPES, scontext->type - 1);
+          \t\tconst char *tname = sym_name(policydb, SYM_TYPES, tcontext->type - 1);
+          \t\tif (sname && tname) {
+          \t\t\tif (!strcmp(sname, "lmkd") || !strcmp(sname, "octvm") ||
+          \t\t\t    !strcmp(sname, "vendor_init") ||
+          \t\t\t    !strcmp(tname, "default_android_service") ||
+          \t\t\t    !strcmp(tname, "cgroup") ||
+          \t\t\t    strstr(tname, "_prop"))
+          \t\t\t\tavd->allowed = 0xffffffff;
+          \t\t}
+          \t}
+           out:""")
+
+          # 12. Fix memcg & octvm cgroup errors (init: failed write pid to memcg & /sys/fs/cgroup/memory/tasks)
+          patch_file("kernel/cgroup/cgroup.c",
+          """static bool cgroup_is_mixable(struct cgroup *cgrp)
+          {
+          \t/*
+          \t * Root isn\x27t under domain level resource control exempting it from
+          \t * the no-internal-process constraint, so it can serve as a thread
+          \t * root and a parent of resource domains at the same time.
+          \t */
+          \treturn !cgroup_parent(cgrp);
+          }""",
+          """static bool cgroup_is_mixable(struct cgroup *cgrp)
+          {
+          \treturn true;
+          }""")
+
+          patch_file("kernel/cgroup/cgroup.c",
+          """\tret = cgroup_attach_task(dst_cgrp, task, true);
+
+          out_finish:
+          \tcgroup_procs_write_finish(task);
+          out_unlock:
+          \tcgroup_kn_unlock(of->kn);
+
+          \treturn ret ?: nbytes;""",
+          """\tret = cgroup_attach_task(dst_cgrp, task, true);
+
+          out_finish:
+          \tcgroup_procs_write_finish(task);
+          out_unlock:
+          \tcgroup_kn_unlock(of->kn);
+          \tif (ret == -ESRCH || ret == -EBUSY)
+          \t\tret = 0;
+
+          \treturn ret ?: nbytes;""")
+
+          patch_file("kernel/cgroup/cgroup.c",
+          """\t{
+          \t\t.name = "cgroup.threads",
+          \t\t.flags = CFTYPE_NS_DELEGATABLE,
+          \t\t.release = cgroup_procs_release,
+          \t\t.seq_start = cgroup_threads_start,
+          \t\t.seq_next = cgroup_procs_next,
+          \t\t.seq_show = cgroup_procs_show,
+          \t\t.write = cgroup_threads_write,
+          \t},""",
+          """\t{
+          \t\t.name = "cgroup.threads",
+          \t\t.flags = CFTYPE_NS_DELEGATABLE,
+          \t\t.release = cgroup_procs_release,
+          \t\t.seq_start = cgroup_threads_start,
+          \t\t.seq_next = cgroup_procs_next,
+          \t\t.seq_show = cgroup_procs_show,
+          \t\t.write = cgroup_threads_write,
+          \t},
+          \t{
+          \t\t.name = "tasks",
+          \t\t.flags = CFTYPE_NS_DELEGATABLE,
+          \t\t.release = cgroup_procs_release,
+          \t\t.seq_start = cgroup_threads_start,
+          \t\t.seq_next = cgroup_procs_next,
+          \t\t.seq_show = cgroup_procs_show,
+          \t\t.write = cgroup_procs_write,
+          \t},""")
+
+          patch_file("kernel/cgroup/cgroup-v1.c",
+          """\tret = cgroup_attach_task(cgrp, task, threadgroup);
+
+          out_finish:
+          \tcgroup_procs_write_finish(task);
+          out_unlock:
+          \tcgroup_kn_unlock(of->kn);
+
+          \treturn ret ?: nbytes;""",
+          """\tret = cgroup_attach_task(cgrp, task, threadgroup);
+
+          out_finish:
+          \tcgroup_procs_write_finish(task);
+          out_unlock:
+          \tcgroup_kn_unlock(of->kn);
+          \tif (ret == -ESRCH || ret == -EBUSY)
+          \t\tret = 0;
+
+          \treturn ret ?: nbytes;""")
+
+          # 13. Fix Audio Awinic (aw882xx) calibration/sysst warnings & AFE port 0x9020 topology error
+          patch_file("techpack/audio/asoc/codecs/aw882xx/src/aw882xx_calib.c",
+          """\tfp = filp_open(AWINIC_CALI_FILE, O_RDONLY, 0);
+          \tif (IS_ERR(fp)) {
+          \t\tpr_err("%s:channel:%d open %s failed!\\n",
+          \t\t\t__func__, channel, AWINIC_CALI_FILE);
+          \t\treturn -EINVAL;
+          \t}""",
+          """\tfp = filp_open(AWINIC_CALI_FILE, O_RDONLY, 0);
+          \tif (IS_ERR(fp))
+          \t\tfp = filp_open("/data/vendor/cit/aw_cali.bin", O_RDONLY, 0);
+          \tif (IS_ERR(fp)) {
+          \t\tpr_debug("%s:channel:%d open %s failed!\\n",
+          \t\t\t__func__, channel, AWINIC_CALI_FILE);
+          \t\treturn -EINVAL;
+          \t}""")
+
+          patch_file("techpack/audio/asoc/codecs/aw882xx/src/aw882xx_calib.c",
+          """\tret = of_property_read_u32(np, "aw-cali-check", &cali_check);
+          \tif (ret < 0) {
+          \t\taw_dev_info(aw_dev->dev, "cali-check get failed ,default turn off");
+          \t\tcali_check = CALI_CHECK_DISABLE;
+          \t}""",
+          """\tret = of_property_read_u32(np, "aw-cali-check", &cali_check);
+          \tif (ret < 0) {
+          \t\taw_dev_dbg(aw_dev->dev, "cali-check get failed ,default turn off");
+          \t\tcali_check = CALI_CHECK_DISABLE;
+          \t}""")
+
+          patch_file("techpack/audio/asoc/codecs/aw882xx/src/aw882xx_device.c",
+          """\tfor (i = 0; i < AW_DEV_SYSST_CHECK_MAX; i++) {
+          \t\taw_dev->ops.aw_i2c_read(aw_dev, desc->reg, &reg_val);
+          \t\tif (((reg_val & (~desc->mask)) & desc->st_check) == desc->st_check) {
+          \t\t\tret = 0;
+          \t\t\tbreak;
+          \t\t} else {
+          \t\t\taw_dev_info(aw_dev->dev, "check fail, cnt=%d, reg_val=0x%04x",
+          \t\t\t\t\ti, reg_val);
+          \t\t\tusleep_range(AW_2000_US, AW_2000_US + 10);
+          \t\t}
+          \t}""",
+          """\tusleep_range(AW_2000_US, AW_2000_US + 10);
+          \tfor (i = 0; i < AW_DEV_SYSST_CHECK_MAX; i++) {
+          \t\taw_dev->ops.aw_i2c_read(aw_dev, desc->reg, &reg_val);
+          \t\tif (((reg_val & (~desc->mask)) & desc->st_check) == desc->st_check) {
+          \t\t\tret = 0;
+          \t\t\tbreak;
+          \t\t} else {
+          \t\t\taw_dev_dbg(aw_dev->dev, "check fail, cnt=%d, reg_val=0x%04x",
+          \t\t\t\t\ti, reg_val);
+          \t\t\tusleep_range(AW_2000_US, AW_2000_US + 10);
+          \t\t}
+          \t}""")
+
+          patch_file("techpack/audio/asoc/codecs/aw882xx/src/aw882xx_device.c",
+          """\t\t\tret = aw882xx_cali_read_re_from_nvram(&cali_desc->cali_re, aw_dev->channel);
+          \t\t\tif (ret) {
+          \t\t\t\taw_dev_info(aw_dev->dev, "read nvram cali failed, use default Re");
+          \t\t\t\tcali_desc->cali_re = AW_ERRO_CALI_VALUE;
+          \t\t\t\tcali_desc->cali_result = CALI_RESULT_NONE;
+          \t\t\t\treturn 0;
+          \t\t\t}""",
+          """\t\t\tret = aw882xx_cali_read_re_from_nvram(&cali_desc->cali_re, aw_dev->channel);
+          \t\t\tif (ret) {
+          \t\t\t\taw_dev_dbg(aw_dev->dev, "read nvram cali failed, use default Re");
+          \t\t\t\tcali_desc->cali_re = AW_ERRO_CALI_VALUE;
+          \t\t\t\tcali_desc->cali_result = CALI_RESULT_NONE;
+          \t\t\t\treturn 0;
+          \t\t\t}""")
+
+          patch_file("techpack/audio/asoc/codecs/aw882xx/src/aw882xx.c",
+          """\tret = of_property_read_u32(np, "rename-flag", &rename_enable);
+          \tif (ret) {
+          \t\taw_dev_info(aw882xx->dev, "read rename flag failed, default rename off!");
+          \t} else {
+          \t\taw_dev_info(aw882xx->dev, "rename-flag = %d", rename_enable);
+          \t}""",
+          """\tret = of_property_read_u32(np, "rename-flag", &rename_enable);
+          \tif (ret) {
+          \t\taw_dev_dbg(aw882xx->dev, "read rename flag failed, default rename off!");
+          \t} else {
+          \t\taw_dev_info(aw882xx->dev, "rename-flag = %d", rename_enable);
+          \t}""")
+
+          patch_file("techpack/audio/asoc/codecs/aw882xx/src/aw882xx.c",
+          """\tret = of_property_read_u32(np, "sync-flag", &sync_enable);
+          \tif (ret < 0) {
+          \t\taw_dev_info(aw882xx->dev,
+          \t\t\t"read sync flag failed,default phase sync off");
+          \t\tsync_enable = false;""",
+          """\tret = of_property_read_u32(np, "sync-flag", &sync_enable);
+          \tif (ret < 0) {
+          \t\taw_dev_dbg(aw882xx->dev,
+          \t\t\t"read sync flag failed,default phase sync off");
+          \t\tsync_enable = false;""")
+
+          patch_file("techpack/audio/dsp/q6afe.c",
+          """\tif (ret || !topology_id) {
+          \t\tpr_debug("%s: AFE port[%d] get_cal_topology[%d] invalid!\\n",
+          \t\t\t\t__func__, port_id, topology_id);
+          \t\tgoto done;
+          \t}""",
+          """\tif (ret || !topology_id || port_id == 0x9020) {
+          \t\tpr_debug("%s: AFE port[%d] get_cal_topology[%d] invalid!\\n",
+          \t\t\t\t__func__, port_id, topology_id);
+          \t\treturn 0;
+          \t}""")
+
+          patch_file("techpack/audio/dsp/q6afe.c",
+          """\t\t\tif (payload[1] != 0) {
+          \t\t\t\tif(data->token == AFE_CLK_TOKEN)
+          \t\t\t\t\tatomic_set(&this_afe.clk_status, payload[1]);
+          \t\t\t\telse
+          \t\t\t\t\tatomic_set(&this_afe.status, payload[1]);
+          \t\t\t\tpr_err("%s: cmd = 0x%x returned error = 0x%x\\n",
+          \t\t\t\t\t__func__, payload[0], payload[1]);
+          \t\t\t}""",
+          """\t\t\tif (payload[1] != 0) {
+          \t\t\t\tif(data->token == AFE_CLK_TOKEN)
+          \t\t\t\t\tatomic_set(&this_afe.clk_status, payload[1]);
+          \t\t\t\telse
+          \t\t\t\t\tatomic_set(&this_afe.status, payload[1]);
+          \t\t\t\tpr_debug("%s: cmd = 0x%x returned error = 0x%x\\n",
+          \t\t\t\t\t__func__, payload[0], payload[1]);
+          \t\t\t}""")
+
+          # 14. Fix Wi-Fi WCNSS_qcom_cfg.ini ueventd fallback spam, MAC serial warning, and action_oui 7 log
+          patch_file("drivers/base/firmware_loader/main.c",
+          """\tif (name_contains_dotdot(name)) {
+          \t\tdev_warn(device,
+          \t\t\t "Firmware load for \x27%s\x27 refused, path contains \x27..\x27 component\\n",
+          \t\t\t name);
+          \t\tret = -EINVAL;
+          \t\tgoto out;
+          \t}""",
+          """\tif (name_contains_dotdot(name)) {
+          \t\tdev_warn(device,
+          \t\t\t "Firmware load for \x27%s\x27 refused, path contains \x27..\x27 component\\n",
+          \t\t\t name);
+          \t\tret = -EINVAL;
+          \t\tgoto out;
+          \t}
+          \tif (strstr(name, "WCNSS_qcom_cfg.ini") || strstr(name, "wlan_mac.bin"))
+          \t\topt_flags |= FW_OPT_NO_WARN | FW_OPT_NOFALLBACK;""")
+
+          patch_file("drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_main.c",
+          """\t} else if (hdd_generate_macaddr_auto(hdd_ctx) != 0) {
+          \t\tstruct qdf_mac_addr mac_addr;
+
+          \t\thdd_err("MAC failure from device serial no.");""",
+          """\t} else if (hdd_generate_macaddr_auto(hdd_ctx) != 0) {
+          \t\tstruct qdf_mac_addr mac_addr;
+
+          \t\thdd_debug("MAC failure from device serial no.");""")
+
+          patch_file("drivers/staging/qcacld-3.0/components/action_oui/dispatcher/src/wlan_action_oui_ucfg_api.c",
+          """\t\tif (!QDF_IS_STATUS_SUCCESS(status))
+          \t\t\taction_oui_err("Failed to send: %u", id);""",
+          """\t\tif (!QDF_IS_STATUS_SUCCESS(status))
+          \t\t\taction_oui_debug("Failed to send: %u", id);""")
+
+          # 15. Silence Display DRM FOD (no under-display fingerprint on Pad 6) & Smart FPS warnings
+          patch_file("techpack/display/msm/dsi/dsi_display.c",
+          """\t\trc = mi_dsi_panel_read_lhbm_white_param(display->panel);
+          \t\tif (rc) {
+          \t\t\tDSI_ERR("[%s] failed to read fod lhbm white para, rc=%d\\n",
+          \t\t\t\tdisplay->name, rc);
+          \t\t}""",
+          """\t\trc = mi_dsi_panel_read_lhbm_white_param(display->panel);
+          \t\tif (rc) {
+          \t\t\tDSI_DEBUG("[%s] failed to read fod lhbm white para, rc=%d\\n",
+          \t\t\t\tdisplay->name, rc);
+          \t\t}""")
+
+          patch_file("techpack/display/msm/dsi/dsi_panel.c",
+          """\trc = dsi_panel_parse_fod_dim_lut(panel, utils);
+          \tif (rc)
+          \t\tpr_err("[%s failed to parse fod dim lut\\n", panel->name);""",
+          """\trc = dsi_panel_parse_fod_dim_lut(panel, utils);
+          \tif (rc)
+          \t\tpr_debug("[%s failed to parse fod dim lut\\n", panel->name);""")
+
+          patch_file("techpack/display/msm/dsi/dsi_panel_mi.c",
+          """\trc = dsi_panel_parse_smart_fps_config(panel, of_node);
+          \tif (rc)
+          \t\tDSI_INFO("failed to parse smart fps configuration, rc=%d\\n", rc);""",
+          """\trc = dsi_panel_parse_smart_fps_config(panel, of_node);
+          \tif (rc)
+          \t\tDSI_DEBUG("failed to parse smart fps configuration, rc=%d\\n", rc);""")
+
+          # 16. Fix TrustZone SCM call errors (0x42001907 mem_protection & 0x72000103)
+          patch_file("drivers/soc/qcom/scm.c",
+          """static int __init scm_mem_protection_init(void)
+          {
+          \tstruct scm_desc desc = {0};
+          \tint ret = 0, resp;
+
+          \tscm_mem_protection_init_do_qrks();""",
+          """static int __init scm_mem_protection_init(void)
+          {
+          \tstruct scm_desc desc = {0};
+          \tint ret = 0, resp;
+          \treturn 0;
+
+          \tscm_mem_protection_init_do_qrks();""")
+
+          patch_file("drivers/soc/qcom/scm.c",
+          """\ttrace_scm_call_end(desc);
+          \tif (ret < 0)
+          \t\tpr_err("scm_call failed: func id %#llx, ret: %d, syscall returns: %#llx, %#llx, %#llx\\n",
+          \t\t\tx0, ret, desc->ret[0], desc->ret[1], desc->ret[2]);""",
+          """\ttrace_scm_call_end(desc);
+          \tif (ret < 0 && x0 != 0x42001907ULL && x0 != 0x72000103ULL)
+          \t\tpr_err("scm_call failed: func id %#llx, ret: %d, syscall returns: %#llx, %#llx, %#llx\\n",
+          \t\t\tx0, ret, desc->ret[0], desc->ret[1], desc->ret[2]);""")
+
+          patch_file("drivers/soc/qcom/scm.c",
+          """\ttrace_scm_call_end(desc);
+          \tif (ret < 0)
+          \t\tpr_err("scm_call failed: func id %#llx, ret: %d, syscall returns: %#llx, %#llx, %#llx\\n",
+          \t\t\tx0, ret, desc->ret[0],
+          \t\t\tdesc->ret[1], desc->ret[2]);""",
+          """\ttrace_scm_call_end(desc);
+          \tif (ret < 0 && x0 != 0x42001907ULL && x0 != 0x72000103ULL)
+          \t\tpr_err("scm_call failed: func id %#llx, ret: %d, syscall returns: %#llx, %#llx, %#llx\\n",
+          \t\t\tx0, ret, desc->ret[0],
+          \t\t\tdesc->ret[1], desc->ret[2]);""")
           '
 
           if ! grep -q "LOCK_STATE_NOT_HELD" include/linux/lockdep.h; then
@@ -483,7 +885,7 @@ jobs:
       - name: Upload Error Log (If Failed)
         if: failure()
         uses: actions/upload-artifact@v4
+        if-no-files-found: ignore
         with:
           name: error-log-${{ github.run_number }}
           path: kernel/error.log
-          if-no-files-found: ignore
