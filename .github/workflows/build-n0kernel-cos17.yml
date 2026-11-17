@@ -261,6 +261,67 @@ jobs:
           \tif (!strcmp(compressor, "lz4") || !strcmp(compressor, "lzo") ||
           \t    !strcmp(compressor, "lzo-rle") || !strcmp(compressor, "lz4kd"))
           \t\tstrlcpy(compressor, "zstd", sizeof(compressor));""")
+
+          # 9. Bridge OPPO UI First (sched_assist) directly to HyperOS 2 top-app cgroup & SurfaceFlinger
+          patch_file("kernel/sched_assist/sched_assist_common.c",
+          """\tif (strstr(task->comm, "surfaceflinger") && strstr(grp_leader->comm, "surfaceflinger")) {
+          \t\t\tsf_pid = task->pid;
+          \t\t\treturn;
+          \t}
+
+          \tif (strstr(task->comm, "RenderEngine") && strstr(grp_leader->comm, "surfaceflinger")) {
+          \t\t\tre_pid = task->pid;
+          \t\t\treturn;
+          \t}""",
+          """\tif (strstr(task->comm, "surfaceflinger") && strstr(grp_leader->comm, "surfaceflinger")) {
+          \t\t\tsf_pid = task->pid;
+          \t\t\ttask->ux_state |= SA_TYPE_ANIMATOR;
+          \t\t\treturn;
+          \t}
+
+          \tif (strstr(task->comm, "RenderEngine") && strstr(grp_leader->comm, "surfaceflinger")) {
+          \t\t\tre_pid = task->pid;
+          \t\t\ttask->ux_state |= SA_TYPE_ANIMATOR;
+          \t\t\treturn;
+          \t}
+
+          \tif (!strcmp(task->comm, "RenderThread") || !strncmp(task->comm, "hwuiTask", 8)) {
+          \t\tif (get_st_group_id(task) == SA_CGROUP_TOP_APP)
+          \t\t\ttask->ux_state |= SA_TYPE_HEAVY;
+          \t\treturn;
+          \t}""")
+
+          patch_file("kernel/sched_assist/sched_assist_common.c",
+          """bool cgroup_check_set_sched_assist_boost(struct task_struct *p)
+          {
+          \treturn im_mali(p);
+          }""",
+          """bool cgroup_check_set_sched_assist_boost(struct task_struct *p)
+          {
+          \treturn (p->pid == p->tgid) || !strcmp(p->comm, "RenderThread") ||
+          \t       !strncmp(p->comm, "hwuiTask", 8) || im_mali(p);
+          }""")
+
+          patch_file("kernel/sched/core.c",
+          """\tcgroup_taskset_for_each(task, css, tset) {
+          \t\tsched_move_task(task);
+          #if defined(CONFIG_UCLAMP_TASK_GROUP) && defined(CONFIG_SCHED_WALT) && !defined(CONFIG_SCHED_TUNE)
+          \t\tsync_cgroup_colocation(task, css_tg(css)->colocate);
+          #endif
+          \t}""",
+          """\tcgroup_taskset_for_each(task, css, tset) {
+          \t\tsched_move_task(task);
+          #if defined(CONFIG_UCLAMP_TASK_GROUP) && defined(CONFIG_SCHED_WALT) && !defined(CONFIG_SCHED_TUNE)
+          \t\tsync_cgroup_colocation(task, css_tg(css)->colocate);
+          #endif
+          #ifdef OPLUS_FEATURE_SCHED_ASSIST
+          \t\tcgroup_set_sched_assist_boost_task(task);
+          #endif
+          \t}""")
+
+          patch_file("kernel/sysctl.c",
+          "int sysctl_sched_assist_scene = 0;",
+          "int sysctl_sched_assist_scene = 0x100; /* SA_GPU_COMPOSITION */")
           '
 
           if ! grep -q "LOCK_STATE_NOT_HELD" include/linux/lockdep.h; then
@@ -354,7 +415,9 @@ jobs:
             -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_ENABLE_LOG
             -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
             -e KSU_SUSFS_OPEN_REDIRECT -e KSU_SUSFS_SUS_MAP
-            -e NTSYNC -e FORCE_FAST_CHARGE -e IOSCHED_MAPLE
+            -e NTSYNC -e FORCE_FAST_CHARGE
+            -e IOSCHED_MAPLE -e DEFAULT_MAPLE -d DEFAULT_CFQ -d DEFAULT_DEADLINE -d DEFAULT_NOOP
+            --set-str DEFAULT_IOSCHED "maple"
             -e ZRAM -e CRYPTO_ZSTD -e ZRAM_DEF_COMP_ZSTD
             -d ZRAM_DEF_COMP_LZ4KD -d ZRAM_DEF_COMP_LZORLE -d ZRAM_DEF_COMP_LZ4
             --set-str ZRAM_DEF_COMP "zstd"
