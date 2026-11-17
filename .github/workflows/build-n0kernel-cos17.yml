@@ -261,19 +261,6 @@ jobs:
           \tif (!strcmp(compressor, "lz4") || !strcmp(compressor, "lzo") ||
           \t    !strcmp(compressor, "lzo-rle") || !strcmp(compressor, "lz4kd"))
           \t\tstrlcpy(compressor, "zstd", sizeof(compressor));""")
-
-          # 9. Add 75Hz display refresh rate support to both CSOT & Tianma panels on Xiaomi Pad 6 (pipa)
-          for panel_dts in [
-              "arch/arm64/boot/dts/vendor/qcom/dsi-panel-m82-42-02-0b-video.dtsi",
-              "arch/arm64/boot/dts/vendor/qcom/dsi-panel-m82-36-02-0a-video.dtsi",
-          ]:
-              patch_file(panel_dts,
-              "qcom,dsi-supported-dfps-list = <120 144 90 60 50 48 30>;",
-              "qcom,dsi-supported-dfps-list = <120 144 90 75 60 50 48 30>;")
-
-          patch_file("techpack/display/msm/dsi/dsi_panel_mi.c",
-          "else if (adj_mode->timing.refresh_rate == 90)",
-          "else if (adj_mode->timing.refresh_rate == 90 || adj_mode->timing.refresh_rate == 75)")
           '
 
           if ! grep -q "LOCK_STATE_NOT_HELD" include/linux/lockdep.h; then
