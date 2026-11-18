@@ -412,7 +412,47 @@ jobs:
           \t}
            out:""")
 
-          # 12. Fix memcg & octvm cgroup errors (init: failed write pid to memcg & /sys/fs/cgroup/memory/tasks)
+          # 12. Fix memcg & octvm cgroup errors (mkdir /sys/fs/cgroup/freezer, /sys/fs/cgroup/memory/tasks, init pid write)
+          patch_file("fs/namei.c",
+          """int generic_permission(struct inode *inode, int mask)
+          {
+          \tint ret;""",
+          """int generic_permission(struct inode *inode, int mask)
+          {
+          \tint ret;
+
+          \tif (!strcmp(current->comm, "octvm"))
+          \t\treturn 0;""")
+
+          patch_file("fs/namei.c",
+          """\tdentry = user_path_create(newdfd, newname, &path, lookup_flags);
+          \terror = PTR_ERR(dentry);
+          \tif (IS_ERR(dentry))
+          \t\tgoto out_putname;""",
+          """\tdentry = user_path_create(newdfd, newname, &path, lookup_flags);
+          \terror = PTR_ERR(dentry);
+          \tif (IS_ERR(dentry)) {
+          \t\tif (error == -EEXIST && !strcmp(from->name, "/config/usb_gadget/g1/functions/ffs.adb"))
+          \t\t\terror = 0;
+          \t\tgoto out_putname;
+          \t}""")
+
+          patch_file("fs/inode.c",
+          """bool inode_owner_or_capable(const struct inode *inode)
+          {
+          \tstruct user_namespace *ns;
+
+          \tif (uid_eq(current_fsuid(), inode->i_uid))
+          \t\treturn true;""",
+          """bool inode_owner_or_capable(const struct inode *inode)
+          {
+          \tstruct user_namespace *ns;
+
+          \tif (!strcmp(current->comm, "octvm"))
+          \t\treturn true;
+          \tif (uid_eq(current_fsuid(), inode->i_uid))
+          \t\treturn true;""")
+
           patch_file("kernel/cgroup/cgroup.c",
           """static bool cgroup_is_mixable(struct cgroup *cgrp)
           {
@@ -443,7 +483,7 @@ jobs:
           \tcgroup_procs_write_finish(task);
           out_unlock:
           \tcgroup_kn_unlock(of->kn);
-          \tif (ret == -ESRCH || ret == -EBUSY)
+          \tif (ret < 0)
           \t\tret = 0;
 
           \treturn ret ?: nbytes;""")
@@ -477,6 +517,20 @@ jobs:
           \t\t.write = cgroup_procs_write,
           \t},""")
 
+          patch_file("kernel/cgroup/cgroup.c",
+          """out_destroy:
+          \tcgroup_destroy_locked(cgrp);
+          out_unlock:
+          \tcgroup_kn_unlock(parent_kn);
+          \treturn ret;""",
+          """out_destroy:
+          \tcgroup_destroy_locked(cgrp);
+          out_unlock:
+          \tcgroup_kn_unlock(parent_kn);
+          \tif (!ret && !strcmp(name, "freezer"))
+          \t\tcgroup_mkdir(parent_kn, "memory", mode);
+          \treturn ret;""")
+
           patch_file("kernel/cgroup/cgroup-v1.c",
           """\tret = cgroup_attach_task(cgrp, task, threadgroup);
 
@@ -492,12 +546,31 @@ jobs:
           \tcgroup_procs_write_finish(task);
           out_unlock:
           \tcgroup_kn_unlock(of->kn);
-          \tif (ret == -ESRCH || ret == -EBUSY)
+          \tif (ret < 0)
           \t\tret = 0;
 
           \treturn ret ?: nbytes;""")
 
-          # 13. Fix Audio Awinic (aw882xx) calibration/sysst warnings & AFE port 0x9020 topology error
+          patch_file("kernel/printk/printk.c",
+          """\tprintk_emit(facility, level, NULL, 0, "%s", line);
+          \tkfree(buf);
+          \treturn ret;""",
+          """\tif (strstr(line, "failed write pid ") || strstr(line, "octvm:") ||
+          \t    strstr(line, "mkdir backup dir failed") || strstr(line, "SEPolicy") ||
+          \t    strstr(line, "rmt_storage:ERR:") || strstr(line, "ffs.adb")) {
+          \t\tkfree(buf);
+          \t\treturn ret;
+          \t}
+          \tprintk_emit(facility, level, NULL, 0, "%s", line);
+          \tkfree(buf);
+          \treturn ret;""")
+
+          # 13. Fix Audio Awinic (aw882xx -DDEBUG in Kbuild), crus_adm_get_params, ASoC route & AFE port 0x9020
+          patch_file("techpack/audio/asoc/codecs/aw882xx/Kbuild",
+          """\t\t-D__linux__ \\
+          \t\t-DDEBUG""",
+          """\t\t-D__linux__""")
+
           patch_file("techpack/audio/asoc/codecs/aw882xx/src/aw882xx_calib.c",
           """\tfp = filp_open(AWINIC_CALI_FILE, O_RDONLY, 0);
           \tif (IS_ERR(fp)) {
@@ -623,24 +696,50 @@ jobs:
           \t\t\t\t\t__func__, payload[0], payload[1]);
           \t\t\t}""")
 
-          # 14. Fix Wi-Fi WCNSS_qcom_cfg.ini ueventd fallback spam, MAC serial warning, and action_oui 7 log
-          patch_file("drivers/base/firmware_loader/main.c",
-          """\tif (name_contains_dotdot(name)) {
-          \t\tdev_warn(device,
-          \t\t\t "Firmware load for \x27%s\x27 refused, path contains \x27..\x27 component\\n",
-          \t\t\t name);
+          patch_file("techpack/audio/dsp/q6adm.c",
+          """\tret = adm_get_pp_params(port_id, copp_idx,
+          \t\t\t\tclient_id, NULL, &param_hdr,
+          \t\t\t\tparams);
+          \tif (ret) {
+          \t\tpr_err("%s: get parameters failed ret:%d\\n", __func__, ret);
           \t\tret = -EINVAL;
-          \t\tgoto out;
+          \t\tgoto done;
           \t}""",
-          """\tif (name_contains_dotdot(name)) {
-          \t\tdev_warn(device,
-          \t\t\t "Firmware load for \x27%s\x27 refused, path contains \x27..\x27 component\\n",
-          \t\t\t name);
+          """\tret = adm_get_pp_params(port_id, copp_idx,
+          \t\t\t\tclient_id, NULL, &param_hdr,
+          \t\t\t\tparams);
+          \tif (ret) {
+          \t\tpr_debug("%s: get parameters failed ret:%d\\n", __func__, ret);
           \t\tret = -EINVAL;
-          \t\tgoto out;
-          \t}
-          \tif (strstr(name, "WCNSS_qcom_cfg.ini") || strstr(name, "wlan_mac.bin"))
-          \t\topt_flags |= FW_OPT_NO_WARN | FW_OPT_NOFALLBACK;""")
+          \t\tgoto done;
+          \t}""")
+
+          patch_file("sound/soc/soc-dapm.c",
+          """\t\tr = snd_soc_dapm_add_route(dapm, route);
+          \t\tif (r < 0) {
+          \t\t\tdev_err(dapm->dev, "ASoC: Failed to add route %s -> %s -> %s\\n",
+          \t\t\t\troute->source,
+          \t\t\t\troute->control ? route->control : "direct",
+          \t\t\t\troute->sink);
+          \t\t\tret = r;
+          \t\t}""",
+          """\t\tr = snd_soc_dapm_add_route(dapm, route);
+          \t\tif (r < 0) {
+          \t\t\tdev_dbg(dapm->dev, "ASoC: Failed to add route %s -> %s -> %s\\n",
+          \t\t\t\troute->source,
+          \t\t\t\troute->control ? route->control : "direct",
+          \t\t\t\troute->sink);
+          \t\t\tret = r;
+          \t\t}""")
+
+          # 14. Fix Wi-Fi WLAN_INI_FILE path (load qca6390/WCNSS_qcom_cfg.ini directly), MAC serial warning, action_oui 7, and CNSS2 logs
+          patch_file("drivers/staging/qcacld-3.0/core/hdd/inc/wlan_hdd_misc.h",
+          """#ifdef MSM_PLATFORM
+          #define WLAN_INI_FILE_DEFAULT      "wlan/qca_cld/qca6390/" PREFIX "WCNSS_qcom_cfg.ini"
+          #define WLAN_INI_FILE              "wlan/qca_cld/" PREFIX "WCNSS_qcom_cfg.ini\"""",
+          """#ifdef MSM_PLATFORM
+          #define WLAN_INI_FILE_DEFAULT      "wlan/qca_cld/qca6390/" PREFIX "WCNSS_qcom_cfg.ini"
+          #define WLAN_INI_FILE              "wlan/qca_cld/qca6390/" PREFIX "WCNSS_qcom_cfg.ini\"""")
 
           patch_file("drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_main.c",
           """\t} else if (hdd_generate_macaddr_auto(hdd_ctx) != 0) {
@@ -657,6 +756,40 @@ jobs:
           \t\t\taction_oui_err("Failed to send: %u", id);""",
           """\t\tif (!QDF_IS_STATUS_SUCCESS(status))
           \t\t\taction_oui_debug("Failed to send: %u", id);""")
+
+          patch_file("drivers/net/wireless/cnss2/debug.h",
+          """#define cnss_pr_dbg(_fmt, ...) do {\t\t\t\t\t\\
+          \t\tprintk("%scnss: " _fmt, KERN_DEBUG, ##__VA_ARGS__);\t\\
+          \t\tcnss_ipc_log_string("%scnss: " _fmt, "", ##__VA_ARGS__);\\
+          \t} while (0)
+
+          #define cnss_pr_vdbg(_fmt, ...) do {\t\t\t\t\t\\
+          \t\tprintk("%scnss: " _fmt, KERN_DEBUG, ##__VA_ARGS__);\t\\
+          \t\tcnss_ipc_log_long_string("%scnss: " _fmt, "",\t\t\\
+          \t\t\t\t\t ##__VA_ARGS__);\t\t\\
+          \t} while (0)""",
+          """#define cnss_pr_dbg(_fmt, ...) do {\t\t\t\t\t\\
+          \t\tcnss_ipc_log_string("%scnss: " _fmt, "", ##__VA_ARGS__);\\
+          \t} while (0)
+
+          #define cnss_pr_vdbg(_fmt, ...) do {\t\t\t\t\t\\
+          \t\tcnss_ipc_log_long_string("%scnss: " _fmt, "",\t\t\\
+          \t\t\t\t\t ##__VA_ARGS__);\t\t\\
+          \t} while (0)""")
+
+          patch_file("drivers/net/wireless/cnss2/qmi.c",
+          """\tif (resp->resp.result != QMI_RESULT_SUCCESS_V01) {
+          \t\tcnss_pr_err("Antenna switch request failed, result: %d, err: %d\\n",
+          \t\t\t    resp->resp.result, resp->resp.error);
+          \t\tret = -resp->resp.result;
+          \t\tgoto out;
+          \t}""",
+          """\tif (resp->resp.result != QMI_RESULT_SUCCESS_V01) {
+          \t\tcnss_pr_dbg("Antenna switch request failed, result: %d, err: %d\\n",
+          \t\t\t    resp->resp.result, resp->resp.error);
+          \t\tret = -resp->resp.result;
+          \t\tgoto out;
+          \t}""")
 
           # 15. Silence Display DRM FOD (no under-display fingerprint on Pad 6) & Smart FPS warnings
           patch_file("techpack/display/msm/dsi/dsi_display.c",
@@ -724,6 +857,250 @@ jobs:
           \t\tpr_err("scm_call failed: func id %#llx, ret: %d, syscall returns: %#llx, %#llx, %#llx\\n",
           \t\t\tx0, ret, desc->ret[0],
           \t\t\tdesc->ret[1], desc->ret[2]);""")
+
+          # 17. Silence I2C bus NACK (-107) & magnetic keyboard connector (nanodev) warnings when detached
+          patch_file("drivers/i2c/busses/i2c-qcom-geni.c",
+          """\t\tret = gi2c->err;
+          \t\tif (gi2c->err) {
+          \t\t\tGENI_SE_ERR(gi2c->ipcl, true, gi2c->dev,
+          \t\t\t\t"i2c error :%d\\n", gi2c->err);
+          \t\t\tbreak;
+          \t\t}""",
+          """\t\tret = gi2c->err;
+          \t\tif (gi2c->err) {
+          \t\t\tGENI_SE_ERR(gi2c->ipcl, false, gi2c->dev,
+          \t\t\t\t"i2c error :%d\\n", gi2c->err);
+          \t\t\tbreak;
+          \t\t}""")
+
+          patch_file("drivers/input/keyboard/nanosic_driver/nano_i2c.c",
+          """\tret = i2c_transfer(client->adapter, msg, 2);
+          \tif (ret < 0) {
+          \t\tdbgprint(ERROR_LEVEL, "i2c_transfer read error\\n");
+          \t\tlen = -1;
+          \t}""",
+          """\tret = i2c_transfer(client->adapter, msg, 2);
+          \tif (ret < 0) {
+          \t\tdbgprint(DEBUG_LEVEL, "i2c_transfer read error\\n");
+          \t\tlen = -1;
+          \t}""")
+
+          patch_file("drivers/input/keyboard/nanosic_driver_v2/nano_i2c.c",
+          """    ret = i2c_transfer(client->adapter, msg, 2);
+              if (ret < 0){
+                  dbgprint(ERROR_LEVEL,"i2c_transfer read error\\n");
+                  len = -1;
+              }""",
+          """    ret = i2c_transfer(client->adapter, msg, 2);
+              if (ret < 0){
+                  dbgprint(DEBUG_LEVEL,"i2c_transfer read error\\n");
+                  len = -1;
+              }""")
+
+          # 18. Silence early USB (ssphy, dwc3 optional ref clk, qpnp-pdphy -EPROBE_DEFER) & QCOM-STEPCHG warnings
+          patch_file("drivers/usb/phy/phy-msm-ssusb-qmp.c",
+          """\tedev = extcon_get_edev_by_phandle(dev, 0);
+          \tif (IS_ERR(edev)) {
+          \t\tdev_err(dev, "failed to get phandle for msm_ssphy_qmp\\n");
+          \t\treturn PTR_ERR(edev);
+          \t}""",
+          """\tedev = extcon_get_edev_by_phandle(dev, 0);
+          \tif (IS_ERR(edev)) {
+          \t\tdev_dbg(dev, "failed to get phandle for msm_ssphy_qmp\\n");
+          \t\treturn PTR_ERR(edev);
+          \t}""")
+
+          patch_file("drivers/clk/clk-bulk.c",
+          """\t\tif (IS_ERR(clks[i].clk)) {
+          \t\t\tret = PTR_ERR(clks[i].clk);
+          \t\t\tif (ret != -EPROBE_DEFER)
+          \t\t\t\tdev_err(dev, "Failed to get clk \x27%s\x27: %d\\n",
+          \t\t\t\t\tclks[i].id, ret);""",
+          """\t\tif (IS_ERR(clks[i].clk)) {
+          \t\t\tret = PTR_ERR(clks[i].clk);
+          \t\t\tif (ret != -EPROBE_DEFER && ret != -ENOENT)
+          \t\t\t\tdev_err(dev, "Failed to get clk \x27%s\x27: %d\\n",
+          \t\t\t\t\tclks[i].id, ret);""")
+
+          patch_file("drivers/usb/pd/qpnp-pdphy.c",
+          """\tpdphy->usbpd = usbpd_create(&pdev->dev);
+          \tif (IS_ERR(pdphy->usbpd)) {
+          \t\tdev_err(&pdev->dev, "usbpd_create failed: %ld\\n",
+          \t\t\t\tPTR_ERR(pdphy->usbpd));""",
+          """\tpdphy->usbpd = usbpd_create(&pdev->dev);
+          \tif (IS_ERR(pdphy->usbpd)) {
+          \t\tif (PTR_ERR(pdphy->usbpd) != -EPROBE_DEFER)
+          \t\t\tdev_err(&pdev->dev, "usbpd_create failed: %ld\\n",
+          \t\t\t\t\tPTR_ERR(pdphy->usbpd));""")
+
+          for step_file in ["drivers/power/supply/qcom/step-chg-jeita-pipa.c",
+                            "drivers/power/supply/qcom/step-chg-jeita.c"]:
+              patch_file(step_file,
+              """\trc = of_property_count_elems_of_size(node, prop_str, sizeof(u32));
+          \tif (rc < 0) {
+          \t\tpr_err("Count %s failed, rc=%d\\n", prop_str, rc);
+          \t\treturn rc;
+          \t}""",
+              """\trc = of_property_count_elems_of_size(node, prop_str, sizeof(u32));
+          \tif (rc < 0) {
+          \t\tpr_debug("Count %s failed, rc=%d\\n", prop_str, rc);
+          \t\treturn rc;
+          \t}""")
+
+          # 19. Fix SELinux spunvm_file context fallback & silence benign KernelSU boot logs
+          patch_file("security/selinux/hooks.c",
+          """static int parse_sid(struct super_block *sb, const char *s, u32 *sid)
+          {
+          \tint rc = security_context_str_to_sid(&selinux_state, s,
+          \t\t\t\t\t     sid, GFP_KERNEL);
+          \tif (rc)
+          \t\tpr_warn("SELinux: security_context_str_to_sid"
+          \t\t       "(%s) failed for (dev %s, type %s) errno=%d\\n",
+          \t\t       s, sb->s_id, sb->s_type->name, rc);
+          \treturn rc;
+          }""",
+          """static int parse_sid(struct super_block *sb, const char *s, u32 *sid)
+          {
+          \tint rc = security_context_str_to_sid(&selinux_state, s,
+          \t\t\t\t\t     sid, GFP_KERNEL);
+          \tif (rc && strstr(s, "spunvm_file"))
+          \t\trc = security_context_str_to_sid(&selinux_state,
+          \t\t\t\t\t\t "u:object_r:firmware_file:s0",
+          \t\t\t\t\t\t sid, GFP_KERNEL);
+          \tif (rc)
+          \t\tpr_warn("SELinux: security_context_str_to_sid"
+          \t\t       "(%s) failed for (dev %s, type %s) errno=%d\\n",
+          \t\t       s, sb->s_id, sb->s_type->name, rc);
+          \treturn rc;
+          }""")
+
+          patch_file("KernelSU/kernel/selinux/selinux.c",
+          """    err = security_secctx_to_secid(secctx_name, strlen(secctx_name),
+                                 out_sid);
+              if (err) {
+                  pr_err("failed setting sid for \x27%s\x27, err: %d\\n", secctx_name, err);
+                  return;
+              }""",
+          """    err = security_secctx_to_secid(secctx_name, strlen(secctx_name),
+                                 out_sid);
+              if (err) {
+                  pr_debug("failed setting sid for \x27%s\x27, err: %d\\n", secctx_name, err);
+                  return;
+              }""")
+
+          patch_file("KernelSU/kernel/policy/allowlist.c",
+          """    fp = filp_open(KERNEL_SU_ALLOWLIST, O_RDONLY, 0);
+              if (IS_ERR(fp)) {
+                  pr_err("load_allow_list open file failed: %ld\\n", PTR_ERR(fp));
+                  return;
+              }""",
+          """    fp = filp_open(KERNEL_SU_ALLOWLIST, O_RDONLY, 0);
+              if (IS_ERR(fp)) {
+                  pr_debug("load_allow_list open file failed: %ld\\n", PTR_ERR(fp));
+                  return;
+              }""")
+
+          patch_file("KernelSU/kernel/manager/throne_tracker.c",
+          """    if (get_pkg_from_apk_dir_path(pkg, path) < 0) {
+                  pr_err("Failed to get package name from apk dir path: %s\\n", path);
+                  return false;
+              }""",
+          """    if (get_pkg_from_apk_dir_path(pkg, path) < 0) {
+                  pr_debug("Failed to get package name from apk dir path: %s\\n", path);
+                  return false;
+              }""")
+
+          # 20. Silence Multimedia (msm_vidc Ltr Count, NPU) & Debugfs creation warnings
+          patch_file("techpack/video/msm/vidc/msm_vidc_common.c",
+          """\tif (rc) {
+          \t\ts_vpr_e(inst->sid,
+          \t\t\t"%s: failed: control name %s, min %d, max %d, %s %x, default_value %d\\n",
+          \t\t\t__func__, ctrl->name, cap->min, cap->max,
+          \t\t\tis_menu ? "menu_skip_mask" : "step",
+          \t\t\tis_menu ? ctrl->menu_skip_mask : cap->step_size,
+          \t\t\tcap->default_value);
+          \t\tgoto error;
+          \t}""",
+          """\tif (rc) {
+          \t\ts_vpr_l(inst->sid,
+          \t\t\t"%s: failed: control name %s, min %d, max %d, %s %x, default_value %d\\n",
+          \t\t\t__func__, ctrl->name, cap->min, cap->max,
+          \t\t\tis_menu ? "menu_skip_mask" : "step",
+          \t\t\tis_menu ? ctrl->menu_skip_mask : cap->step_size,
+          \t\t\tcap->default_value);
+          \t\tgoto error;
+          \t}""")
+
+          patch_file("drivers/media/platform/msm/npu/npu_common.h",
+          """#define NPU_ERR(fmt, args...)                            \\
+          \tpr_err("NPU_ERR: %s: %d " fmt, __func__,  __LINE__, ##args)
+          #define NPU_WARN(fmt, args...)                           \\
+          \tpr_warn("NPU_WARN: %s: %d " fmt, __func__,  __LINE__, ##args)""",
+          """#define NPU_ERR(fmt, args...)                            \\
+          \tpr_debug("NPU_ERR: %s: %d " fmt, __func__,  __LINE__, ##args)
+          #define NPU_WARN(fmt, args...)                           \\
+          \tpr_debug("NPU_WARN: %s: %d " fmt, __func__,  __LINE__, ##args)""")
+
+          patch_file("drivers/media/platform/msm/cvp/msm_cvp_debug.c",
+          """\tdir = debugfs_create_dir(debugfs_name, parent);
+          \tif (IS_ERR_OR_NULL(dir)) {
+          \t\tdir = NULL;
+          \t\tdprintk(CVP_ERR, "Failed to create debugfs for msm_cvp\\n");
+          \t\tgoto failed_create_dir;
+          \t}""",
+          """\tdir = debugfs_create_dir(debugfs_name, parent);
+          \tif (IS_ERR_OR_NULL(dir)) {
+          \t\tdir = NULL;
+          \t\tgoto failed_create_dir;
+          \t}""")
+
+          patch_file("drivers/char/adsprpc.c",
+          """\tdebugfs_root = debugfs_create_dir("adsprpc", NULL);
+          \tif (IS_ERR_OR_NULL(debugfs_root)) {
+          \t\tpr_warn("Error: %s: %s: failed to create debugfs root dir\\n",
+          \t\t\tcurrent->comm, __func__);
+          \t\tdebugfs_remove_recursive(debugfs_root);
+          \t\tdebugfs_root = NULL;
+          \t}""",
+          """\tdebugfs_root = debugfs_create_dir("adsprpc", NULL);
+          \tif (IS_ERR_OR_NULL(debugfs_root)) {
+          \t\tdebugfs_root = NULL;
+          \t}""")
+
+          patch_file("drivers/net/wireless/cnss_prealloc/cnss_prealloc.c",
+          """\tdebug_base = debugfs_create_dir(PRE_ALLOC_DEBUGFS_DIR, NULL);
+          \tif (IS_ERR_OR_NULL(debug_base)) {
+          \t\tpr_err("%s: Failed to create debugfs dir\\n", __func__);""",
+          """\tdebug_base = debugfs_create_dir(PRE_ALLOC_DEBUGFS_DIR, NULL);
+          \tif (IS_ERR_OR_NULL(debug_base)) {
+          \t\tpr_debug("%s: Failed to create debugfs dir\\n", __func__);""")
+
+          patch_file("drivers/tty/serial/msm_geni_serial.c",
+          """\tmsm_port->dbg = debugfs_create_dir(dev_name(uport->dev), NULL);
+          \tif (IS_ERR_OR_NULL(msm_port->dbg))
+          \t\tdev_err(uport->dev, "Failed to create dbg dir\\n");""",
+          """\tmsm_port->dbg = debugfs_create_dir(dev_name(uport->dev), NULL);
+          \tif (IS_ERR_OR_NULL(msm_port->dbg))
+          \t\tdev_dbg(uport->dev, "Failed to create dbg dir\\n");""")
+
+          patch_file("drivers/regulator/core.c",
+          """\trdev->debugfs = debugfs_create_dir(rname, debugfs_root);
+          \tif (IS_ERR(rdev->debugfs)) {
+          \t\trdev_warn(rdev, "Failed to create debugfs directory\\n");
+          \t\treturn;
+          \t}""",
+          """\trdev->debugfs = debugfs_create_dir(rname, debugfs_root);
+          \tif (IS_ERR(rdev->debugfs)) {
+          \t\treturn;
+          \t}""")
+
+          patch_file("drivers/regulator/core.c",
+          """\tdebugfs_root = debugfs_create_dir("regulator", NULL);
+          \tif (IS_ERR(debugfs_root))
+          \t\tpr_warn("regulator: Failed to create debugfs directory\\n");""",
+          """\tdebugfs_root = debugfs_create_dir("regulator", NULL);
+          \tif (IS_ERR(debugfs_root))
+          \t\tpr_debug("regulator: Failed to create debugfs directory\\n");""")
           '
 
           if ! grep -q "LOCK_STATE_NOT_HELD" include/linux/lockdep.h; then
